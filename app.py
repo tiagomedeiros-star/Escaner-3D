@@ -1,13 +1,15 @@
 import os
+import base64
 import requests
 from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
 
-# Puxa a chave da Tripo AI das variáveis da Vercel
-TRIPO_API_KEY = os.environ.get("TRIPO_API_KEY")
+# Vai buscar a chave da Meshy às variáveis de ambiente da Vercel
+MESHY_API_KEY = os.environ.get("MESHY_API_KEY")
 HEADERS = {
-    "Authorization": f"Bearer {TRIPO_API_KEY}"
+    "Authorization": f"Bearer {MESHY_API_KEY}",
+    "Content-Type": "application/json"
 }
 
 @app.route('/')
@@ -22,63 +24,56 @@ def upload():
     image = request.files['image']
     
     try:
-        # 1. Faz o upload da imagem para os servidores da Tripo
-        upload_res = requests.post(
-            "https://api.tripo3d.ai/v2/openapi/upload",
+        # A Meshy aceita o upload direto convertendo a imagem para formato base64
+        image_data = image.read()
+        base64_encoded = base64.b64encode(image_data).decode('utf-8')
+        mime_type = image.mimetype or 'image/jpeg'
+        data_uri = f"data:{mime_type};base64,{base64_encoded}"
+        
+        payload = {
+            "image_url": data_uri,
+            "enable_pbr": True # Ativa texturas realistas
+        }
+        
+        # 1. Pede à Meshy para gerar o modelo 3D
+        res = requests.post(
+            "https://api.meshy.ai/v1/image-to-3d",
             headers=HEADERS,
-            files={"file": (image.filename, image.stream, image.mimetype)}
+            json=payload
         )
-        upload_data = upload_res.json()
+        data = res.json()
         
-        if upload_data.get("code") != 0:
-            return jsonify({'error': f"Erro no upload: {upload_data}"}), 500
+        if res.status_code not in [200, 202]:
+            return jsonify({'error': f"Erro na Meshy: {data}"}), 500
             
-        image_token = upload_data["data"]["image_token"]
+        task_id = data.get("result")
         
-        # 2. Pede à IA para criar o modelo 3D a partir da imagem
-        task_res = requests.post(
-            "https://api.tripo3d.ai/v2/openapi/task",
-            headers={**HEADERS, "Content-Type": "application/json"},
-            json={
-                "type": "image_to_model",
-                "file": {
-                    "type": "jpg",
-                    "file_token": image_token
-                }
-            }
-        )
-        task_data = task_res.json()
-        
-        if task_data.get("code") != 0:
-            return jsonify({'error': f"Erro na tarefa: {task_data}"}), 500
-            
-        return jsonify({'capture_id': task_data["data"]["task_id"]})
+        return jsonify({'capture_id': task_id})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/status/<capture_id>', methods=['GET'])
 def status(capture_id):
     try:
+        # 2. Pergunta à Meshy se o modelo já está pronto
         res = requests.get(
-            f"https://api.tripo3d.ai/v2/openapi/task/{capture_id}",
+            f"https://api.meshy.ai/v1/image-to-3d/{capture_id}",
             headers=HEADERS
         )
         data = res.json()
         
-        if data.get("code") != 0:
-            return jsonify({'error': 'Erro ao consultar status'}), 500
-            
-        estado = data["data"]["status"].lower()
+        estado = data.get("status", "").upper()
         
-        if estado == "success":
-            # A Tripo devolve o modelo principal pronto para download
-            model_url = data["data"]["result"]["model"]["url"]
+        if estado == "SUCCEEDED":
+            model_urls = data.get("model_urls", {})
+            # A Meshy devolve GLB (perfeito para web) ou OBJ. Vamos dar prioridade ao OBJ.
+            model_url = model_urls.get("obj") or model_urls.get("glb") or ""
             return jsonify({'status': 'completed', 'model_url': model_url})
             
-        elif estado in ["failed", "cancelled"]:
+        elif estado in ["FAILED", "EXPIRED", "CANCELED"]:
             return jsonify({'status': 'failed'})
             
-        return jsonify({'status': estado})
+        return jsonify({'status': estado.replace('IN_PROGRESS', 'PROCESSANDO')})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
