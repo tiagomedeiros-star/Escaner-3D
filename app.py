@@ -54,21 +54,28 @@ def upload():
         if folha_cnt is None:
             return jsonify({'error': 'Cantos da folha A4 não encontrados. Enquadre todo o papel com contraste no fundo.'}), 400
 
-        # 2. Correção de perspetiva da folha
+        # 2. Correção de perspetiva com rotação inteligente (Retrato vs Paisagem)
         pts_origem = ordenar_pontos(folha_cnt.reshape(4, 2))
         (tl, tr, br, bl) = pts_origem
 
-        largura_media = max(int(np.linalg.norm(tr - tl)), int(np.linalg.norm(br - bl)))
-        altura_media = max(int(np.linalg.norm(tr - br)), int(np.linalg.norm(tl - bl)))
+        largura_topo = np.linalg.norm(tr - tl)
+        largura_base = np.linalg.norm(br - bl)
+        largura_media = max(int(largura_topo), int(largura_base))
 
+        altura_dir = np.linalg.norm(tr - br)
+        altura_esq = np.linalg.norm(tl - bl)
+        altura_media = max(int(altura_dir), int(altura_esq))
+
+        # Determina a orientação real da folha no visor
         if largura_media > altura_media:
             largura_real_mm, altura_real_mm = A4_MAIOR_MM, A4_MENOR_MM
         else:
             largura_real_mm, altura_real_mm = A4_MENOR_MM, A4_MAIOR_MM
 
-        px_por_mm = 3.0
-        largura_px = int(largura_real_mm * px_por_mm)
-        altura_px = int(altura_real_mm * px_por_mm)
+        # Normaliza a escala (4 pixels por mm para alta precisão)
+        escala_px = 4
+        largura_px = int(largura_real_mm * escala_px)
+        altura_px = int(altura_real_mm * escala_px)
 
         pts_destino = np.array([
             [0, 0],
@@ -80,49 +87,42 @@ def upload():
         matriz = cv2.getPerspectiveTransform(pts_origem, pts_destino)
         folha_alinhada = cv2.warpPerspective(img, matriz, (largura_px, altura_px))
 
-        # 3. Recorte com margem interna de segurança (15 mm de borda descartada)
-        margem_px = int(15 * px_por_mm)
-        folha_util = folha_alinhada[margem_px:altura_px - margem_px, margem_px:largura_px - margem_px]
+        px_por_mm = escala_px
 
-        # 4. Detetar a peça dentro da área útil
-        gray_util = cv2.cvtColor(folha_util, cv2.COLOR_BGR2GRAY)
-        blur_util = cv2.GaussianBlur(gray_util, (7, 7), 0)
-        _, thresh = cv2.threshold(blur_util, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # 3. Segmentação com limiar adaptativo Otsu (elimina sombras graduais)
+        gray_folha = cv2.cvtColor(folha_alinhada, cv2.COLOR_BGR2GRAY)
+        blur_folha = cv2.GaussianBlur(gray_folha, (7, 7), 0)
+        _, thresh = cv2.threshold(blur_folha, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Descarta bordas da própria folha (margem de segurança de 15px)
+        cv2.rectangle(thresh, (0, 0), (largura_px, altura_px), 0, 30)
 
         peca_cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        area_total_util = folha_util.shape[0] * folha_util.shape[1]
-        
-        # Filtra contornos: descarta sujeira pequena E descarta objetos que ocupem quase a folha toda
-        pecas_validas = [
-            c for c in peca_cnts 
-            if 1000 < cv2.contourArea(c) < (0.80 * area_total_util)
-        ]
+        pecas_validas = [c for c in peca_cnts if cv2.contourArea(c) > 1500]
 
         if not pecas_validas:
-            return jsonify({'error': 'A folha A4 foi identificada, mas a peça não foi destacada. Certifique-se de que a peça tem contraste contra o papel branco.'}), 400
+            return jsonify({'error': 'Nenhuma peça identificada no interior da folha.'}), 400
 
-        # Seleciona o maior objeto dentro da folha (ignorando a folha em si)
+        # 4. Caixa Delimitadora Girada (minAreaRect)
         peca_principal = max(pecas_validas, key=cv2.contourArea)
         rect_girado = cv2.minAreaRect(peca_principal)
         (centro, (tam_1, tam_2), angulo) = rect_girado
 
+        # Converte pixels para milímetros
         dim_a_mm = tam_1 / px_por_mm
         dim_b_mm = tam_2 / px_por_mm
 
         maior_dim = max(dim_a_mm, dim_b_mm)
         menor_dim = min(dim_a_mm, dim_b_mm)
 
-        # Ajusta os pontos para a imagem da folha alinhada completa
+        # 5. Desenhar o contorno orientado exato
         box = cv2.boxPoints(rect_girado)
-        box = box + np.array([margem_px, margem_px])
         box = np.int0(box)
-
         cv2.drawContours(folha_alinhada, [box], 0, (0, 255, 0), 3)
 
-        cx, cy = int(centro[0] + margem_px), int(centro[1] + margem_px)
+        cx, cy = int(centro[0]), int(centro[1])
         texto = f"{maior_dim:.1f} x {menor_dim:.1f} mm"
-        cv2.putText(folha_alinhada, texto, (cx - 80, max(40, cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(folha_alinhada, texto, (cx - 100, max(40, cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
         _, buffer = cv2.imencode('.jpg', folha_alinhada)
         img_b64 = base64.b64encode(buffer).decode('utf-8')
