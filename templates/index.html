@@ -3,93 +3,69 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scanner 3D</title>
+    <title>Scanner 3D Rápido (Tripo)</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f4f4f9; }
         video { width: 100%; max-width: 400px; background: #000; border-radius: 8px; margin-bottom: 15px; }
+        canvas { display: none; }
         button { padding: 15px 20px; font-size: 16px; margin: 5px; cursor: pointer; border: none; border-radius: 5px; }
-        #btnStart { background-color: #28a745; color: white; }
-        #btnStop { background-color: #dc3545; color: white; }
+        #btnCapture { background-color: #28a745; color: white; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
         #status { margin-top: 20px; font-weight: bold; color: #333; }
         #downloadLink { display: inline-block; margin-top: 15px; padding: 15px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; display: none; }
     </style>
 </head>
 <body>
-    <h2>Scanner 3D Leve (Vercel)</h2>
-    <p>Aponte para a peça, clique em Gravar e circule-a (máx. 15s).</p>
+    <h2>Scanner 3D Rápido</h2>
+    <p>Aponte para a peça mecânica e tire uma foto nítida.</p>
     
-    <video id="preview" autoplay muted playsinline></video><br>
+    <video id="preview" autoplay muted playsinline></video>
+    <canvas id="canvas"></canvas><br>
     
-    <button id="btnStart">🔴 Gravar Vídeo</button>
-    <button id="btnStop" disabled>⏹ Parar e Gerar 3D</button>
+    <button id="btnCapture">📸 Tirar Foto e Gerar 3D</button>
     
     <div id="status">Câmera inicializando...</div>
-    <a id="downloadLink" href="#" target="_blank">📥 Baixar Arquivo (.OBJ)</a>
+    <a id="downloadLink" href="#" target="_blank">📥 Baixar Arquivo 3D</a>
 
     <script>
-        let mediaRecorder;
-        let recordedChunks = [];
-
         const videoPreview = document.getElementById('preview');
-        const btnStart = document.getElementById('btnStart');
-        const btnStop = document.getElementById('btnStop');
+        const canvas = document.getElementById('canvas');
+        const btnCapture = document.getElementById('btnCapture');
         const statusText = document.getElementById('status');
         const downloadLink = document.getElementById('downloadLink');
 
         async function initCamera() {
             try {
-                // Força resolução 480p para não estourar o limite da Vercel
+                // Resolução HD para garantir detalhes da peça
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        facingMode: "environment",
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
-                    } 
+                    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
                 });
                 videoPreview.srcObject = stream;
-                statusText.innerText = "Pronto para gravar.";
+                statusText.innerText = "Pronto para capturar.";
             } catch (err) {
-                statusText.innerText = "Erro ao acessar a câmera. Dê permissão no navegador.";
+                statusText.innerText = "Erro ao acessar a câmera.";
             }
         }
 
-        btnStart.addEventListener('click', () => {
-            recordedChunks = [];
-            const stream = videoPreview.srcObject;
+        btnCapture.addEventListener('click', () => {
+            btnCapture.disabled = true;
+            statusText.innerText = "Processando imagem...";
             
-            // Força bitrate baixo (~500 kbps)
-            const options = { 
-                mimeType: 'video/webm',
-                videoBitsPerSecond: 500000 
-            };
+            // "Tira a foto" desenhando o vídeo num canvas invisível
+            canvas.width = videoPreview.videoWidth;
+            canvas.height = videoPreview.videoHeight;
+            canvas.getContext('2d').drawImage(videoPreview, 0, 0);
             
-            mediaRecorder = new MediaRecorder(stream, options);
-            
-            mediaRecorder.ondataavailable = event => {
-                if (event.data.size > 0) recordedChunks.push(event.data);
-            };
-
-            mediaRecorder.onstop = uploadVideo;
-            mediaRecorder.start();
-            
-            btnStart.disabled = true;
-            btnStop.disabled = false;
-            statusText.innerText = "Gravando... Mova a câmera lentamente.";
+            // Converte o canvas para um arquivo JPG
+            canvas.toBlob(blob => {
+                uploadImage(blob);
+            }, 'image/jpeg', 0.9);
         });
 
-        btnStop.addEventListener('click', () => {
-            mediaRecorder.stop();
-            btnStart.disabled = false;
-            btnStop.disabled = true;
-            statusText.innerText = "Empacotando vídeo...";
-        });
-
-        async function uploadVideo() {
+        async function uploadImage(imageBlob) {
             statusText.innerText = "Enviando para o servidor...";
-            const blob = new Blob(recordedChunks, { type: 'video/webm' });
             const formData = new FormData();
-            formData.append('video', blob, 'scan.webm');
+            formData.append('image', imageBlob, 'peca.jpg');
 
             try {
                 const response = await fetch('/upload', { method: 'POST', body: formData });
@@ -99,18 +75,20 @@
                     checkStatus(data.capture_id);
                 } else {
                     statusText.innerText = "Erro no servidor: " + data.error;
+                    btnCapture.disabled = false;
                 }
             } catch (err) {
-                statusText.innerText = "Erro de conexão. O vídeo pode estar muito grande.";
+                statusText.innerText = "Erro de conexão.";
+                btnCapture.disabled = false;
             }
         }
 
-        async function checkStatus(captureId) {
-            statusText.innerText = "Processando 3D (Leva de 2 a 5 minutos)...";
+        async function checkStatus(taskId) {
+            statusText.innerText = "A Inteligência Artificial está gerando o 3D (leva de 10 a 20 segundos)...";
             
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch(`/status/${captureId}`);
+                    const res = await fetch(`/status/${taskId}`);
                     const data = await res.json();
                     
                     if (data.status === 'completed') {
@@ -118,16 +96,18 @@
                         statusText.innerText = "Modelo gerado com sucesso!";
                         downloadLink.href = data.model_url;
                         downloadLink.style.display = "inline-block";
+                        btnCapture.disabled = false;
                     } else if (data.status === 'failed') {
                         clearInterval(interval);
-                        statusText.innerText = "A IA falhou (tente iluminar melhor ou adicionar textura ao fundo).";
+                        statusText.innerText = "A IA falhou em processar a peça.";
+                        btnCapture.disabled = false;
                     } else {
-                        statusText.innerText = `Gerando 3D... (Status Luma API: ${data.status})`;
+                        statusText.innerText = `Esculpindo modelo... (Status: ${data.status})`;
                     }
                 } catch(err) {
                     console.log("Aguardando rede...");
                 }
-            }, 5000); 
+            }, 3000); // Pergunta à Vercel a cada 3 segundos
         }
 
         initCamera();
