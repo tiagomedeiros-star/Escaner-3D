@@ -5,8 +5,10 @@ from flask import Flask, request, jsonify, render_template
 app = Flask(__name__)
 
 LUMA_API_KEY = os.environ.get("LUMA_API_KEY")
+
+# Formato de autenticação exato exigido pela API de Captura 3D clássica
 HEADERS = {
-    "Authorization": f"Bearer {LUMA_API_KEY}"
+    "Authorization": f"luma-api-key {LUMA_API_KEY}"
 }
 
 @app.route('/')
@@ -20,30 +22,31 @@ def upload():
     
     video = request.files['video']
     
-    # 1. Pede à Luma uma URL de upload assinada (Upload URL)
     try:
+        # 1. Pede à Luma para criar um projeto e gerar um link seguro de upload
         url_response = requests.post(
-            "https://api.lumalabs.ai/api/v2/capture/upload_url", 
+            "https://api.lumalabs.ai/api/v2/capture", 
             headers=HEADERS, 
-            params={"title": "Scan de Suporte"}
+            data={"title": "Scan de Suporte"}
         )
         url_data = url_response.json()
         
         if 'uploadUrl' not in url_data:
-            return jsonify({'error': 'Falha ao obter URL de upload', 'details': url_data}), 500
+            # Se a Luma recusar, devolve o erro real da Luma para o ecrã
+            return jsonify({'error': f"Resposta da Luma: {url_data}"}), 500
             
         upload_url = url_data['uploadUrl']
         capture_id = url_data['slug']
         
-        # 2. Faz o upload direto do vídeo em memória para o link recebido (sem guardar no disco da Vercel)
-        upload_response = requests.put(
+        # 2. Faz o upload direto do vídeo em memória para o link seguro recebido
+        requests.put(
             upload_url, 
             data=video.read(), 
             headers={"Content-Type": "video/webm"}
         )
         
-        # 3. Avisa a Luma para iniciar o processamento 3D
-        trigger_response = requests.post(
+        # 3. Dá o comando à Luma para iniciar o processamento 3D do vídeo enviado
+        requests.post(
             f"https://api.lumalabs.ai/api/v2/capture/{capture_id}/trigger", 
             headers=HEADERS
         )
@@ -65,9 +68,11 @@ def status(capture_id):
         
         if estado == "FINISHED":
             model_url = ""
-            for artifact in data.get('artifacts', []):
+            # Procura o link do ficheiro 3D (.obj ou .zip) nos resultados
+            artifacts = data.get('latestRun', {}).get('artifacts', []) or data.get('artifacts', [])
+            for artifact in artifacts:
                 url = artifact.get('url', '')
-                if '.obj' in url.lower() or '.zip' in url.lower():
+                if url.endswith('.obj') or url.endswith('.zip'):
                     model_url = url
                     break
             return jsonify({'status': 'completed', 'model_url': model_url})
