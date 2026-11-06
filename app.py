@@ -18,48 +18,52 @@ def upload():
     image_bytes = image_file.read()
     
     try:
-        # 1. Converter a foto recebida para o formato do OpenCV
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # 2. Processar a imagem para detetar bordas (escala de cinza, desfoque e Canny)
+        # 1. Filtros melhorados para lidar com sombras e reflexos
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (7, 7), 0)
-        edged = cv2.Canny(gray, 50, 100)
-        edged = cv2.dilate(edged, None, iterations=1)
-        edged = cv2.erode(edged, None, iterations=1)
+        gray = cv2.GaussianBlur(gray, (9, 9), 0)
         
-        # 3. Encontrar os objetos (contornos) na imagem
+        # Margens mais amplas para apanhar objetos com menos contraste
+        edged = cv2.Canny(gray, 30, 150)
+        
+        # Operação "Close" para unir linhas quebradas (fecha os contornos dos objetos)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        edged = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel)
+        
         cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Ignorar sujidade ou pequenos reflexos filtrando pelo tamanho da área
-        valid_cnts = [c for c in cnts if cv2.contourArea(c) > 3000]
+        # Reduzimos a área mínima para apanhar objetos mesmo se a foto for tirada de longe
+        valid_cnts = [c for c in cnts if cv2.contourArea(c) > 1000]
         
+        # 2. MODO DEBUG: Se falhar, mostra o que a câmara viu
         if len(valid_cnts) < 2:
-            return jsonify({'error': 'Não foram detetados 2 objetos claros. Usa um fundo liso (ex: folha branca).'}), 400
+            cv2.putText(img, f"ERRO: Encontrou {len(valid_cnts)} objetos.", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            cv2.putText(img, "Melhora o contraste ou remove as sombras.", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            # Desenha a vermelho tudo o que o algoritmo considerou ser um objeto
+            cv2.drawContours(img, valid_cnts, -1, (0, 0, 255), 2)
             
-        # 4. Ordenar os objetos da Esquerda para a Direita
+            _, buffer = cv2.imencode('.jpg', img)
+            img_b64 = base64.b64encode(buffer).decode('utf-8')
+            return jsonify({'image_url': f"data:image/jpeg;base64,{img_b64}"})
+            
+        # 3. Ordenar da Esquerda (Cartão) para a Direita (Peça)
         valid_cnts = sorted(valid_cnts, key=lambda c: cv2.boundingRect(c)[0])
         
-        # O objeto mais à esquerda (índice 0) deve ser o Cartão de Referência (85.6 mm)
         ref_x, ref_y, ref_w, ref_h = cv2.boundingRect(valid_cnts[0])
         pixels_por_milimetro = ref_w / 85.6
         
-        # 5. Medir e desenhar retângulos verdes e os valores em mm
         for c in valid_cnts:
             x, y, w, h = cv2.boundingRect(c)
             
             largura_mm = w / pixels_por_milimetro
             altura_mm = h / pixels_por_milimetro
             
-            # Desenha a caixa verde
             cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            
-            # Escreve o texto com as medidas
             texto = f"{largura_mm:.1f} x {altura_mm:.1f} mm"
             cv2.putText(img, texto, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
-        # 6. Converter a imagem processada de volta para envio ao navegador
         _, buffer = cv2.imencode('.jpg', img)
         img_b64 = base64.b64encode(buffer).decode('utf-8')
         
