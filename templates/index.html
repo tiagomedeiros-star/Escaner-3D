@@ -1,113 +1,89 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scanner 3D Rápido (Tripo)</title>
+    <title>Paquímetro Fotográfico</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f4f4f9; }
         video { width: 100%; max-width: 400px; background: #000; border-radius: 8px; margin-bottom: 15px; }
         canvas { display: none; }
+        img#resultImage { width: 100%; max-width: 500px; border-radius: 8px; margin-top: 20px; display: none; border: 2px solid #28a745; }
         button { padding: 15px 20px; font-size: 16px; margin: 5px; cursor: pointer; border: none; border-radius: 5px; }
         #btnCapture { background-color: #28a745; color: white; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
         #status { margin-top: 20px; font-weight: bold; color: #333; }
-        #downloadLink { display: inline-block; margin-top: 15px; padding: 15px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; display: none; }
+        .instructions { font-size: 14px; color: #555; margin-bottom: 15px; text-align: left; max-width: 400px; margin: 0 auto 15px auto; }
     </style>
 </head>
 <body>
-    <h2>Scanner 3D Rápido</h2>
-    <p>Aponte para a peça mecânica e tire uma foto nítida.</p>
+    <h2>Paquímetro Fotográfico</h2>
+    
+    <div class="instructions">
+        <strong>Regras para medição exata:</strong><br>
+        1. Coloca a peça numa folha de papel branca (para dar contraste).<br>
+        2. Coloca um <b>Cartão de Crédito</b> do lado <b>ESQUERDO</b> da peça.<br>
+        3. Tira a foto exatamente de cima (ângulo de 90 graus).
+    </div>
     
     <video id="preview" autoplay muted playsinline></video>
     <canvas id="canvas"></canvas><br>
     
-    <button id="btnCapture">📸 Tirar Foto e Gerar 3D</button>
+    <button id="btnCapture">📸 Medir Peça</button>
     
-    <div id="status">Câmera inicializando...</div>
-    <a id="downloadLink" href="#" target="_blank">📥 Baixar Arquivo 3D</a>
+    <div id="status">A iniciar câmara...</div>
+    <img id="resultImage" alt="Resultado das medidas" />
 
     <script>
         const videoPreview = document.getElementById('preview');
         const canvas = document.getElementById('canvas');
         const btnCapture = document.getElementById('btnCapture');
         const statusText = document.getElementById('status');
-        const downloadLink = document.getElementById('downloadLink');
+        const resultImage = document.getElementById('resultImage');
 
         async function initCamera() {
             try {
-                // Resolução HD para garantir detalhes da peça
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
                 });
                 videoPreview.srcObject = stream;
-                statusText.innerText = "Pronto para capturar.";
+                statusText.innerText = "Pronto para medir.";
             } catch (err) {
-                statusText.innerText = "Erro ao acessar a câmera.";
+                statusText.innerText = "Erro ao aceder à câmara.";
             }
         }
 
         btnCapture.addEventListener('click', () => {
             btnCapture.disabled = true;
-            statusText.innerText = "Processando imagem...";
+            statusText.innerText = "A medir...";
+            resultImage.style.display = "none";
             
-            // "Tira a foto" desenhando o vídeo num canvas invisível
             canvas.width = videoPreview.videoWidth;
             canvas.height = videoPreview.videoHeight;
             canvas.getContext('2d').drawImage(videoPreview, 0, 0);
             
-            // Converte o canvas para um arquivo JPG
-            canvas.toBlob(blob => {
-                uploadImage(blob);
-            }, 'image/jpeg', 0.9);
+            canvas.toBlob(blob => { uploadImage(blob); }, 'image/jpeg', 0.9);
         });
 
         async function uploadImage(imageBlob) {
-            statusText.innerText = "Enviando para o servidor...";
             const formData = new FormData();
-            formData.append('image', imageBlob, 'peca.jpg');
+            formData.append('image', imageBlob, 'medicao.jpg');
 
             try {
                 const response = await fetch('/upload', { method: 'POST', body: formData });
                 const data = await response.json();
                 
-                if (data.capture_id) {
-                    checkStatus(data.capture_id);
+                if (data.image_url) {
+                    statusText.innerText = "Medição concluída!";
+                    resultImage.src = data.image_url;
+                    resultImage.style.display = "block";
                 } else {
-                    statusText.innerText = "Erro no servidor: " + data.error;
-                    btnCapture.disabled = false;
+                    statusText.innerText = "Erro: " + data.error;
                 }
             } catch (err) {
-                statusText.innerText = "Erro de conexão.";
-                btnCapture.disabled = false;
+                statusText.innerText = "Erro de ligação. Tenta novamente.";
             }
-        }
-
-        async function checkStatus(taskId) {
-            statusText.innerText = "A Inteligência Artificial está gerando o 3D (leva de 10 a 20 segundos)...";
-            
-            const interval = setInterval(async () => {
-                try {
-                    const res = await fetch(`/status/${taskId}`);
-                    const data = await res.json();
-                    
-                    if (data.status === 'completed') {
-                        clearInterval(interval);
-                        statusText.innerText = "Modelo gerado com sucesso!";
-                        downloadLink.href = data.model_url;
-                        downloadLink.style.display = "inline-block";
-                        btnCapture.disabled = false;
-                    } else if (data.status === 'failed') {
-                        clearInterval(interval);
-                        statusText.innerText = "A IA falhou em processar a peça.";
-                        btnCapture.disabled = false;
-                    } else {
-                        statusText.innerText = `Esculpindo modelo... (Status: ${data.status})`;
-                    }
-                } catch(err) {
-                    console.log("Aguardando rede...");
-                }
-            }, 3000); // Pergunta à Vercel a cada 3 segundos
+            btnCapture.disabled = false;
         }
 
         initCamera();
