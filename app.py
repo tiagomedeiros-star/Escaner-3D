@@ -1,16 +1,9 @@
-import os
+import cv2
+import numpy as np
 import base64
-import requests
 from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
-
-# Vai buscar a chave da Meshy às variáveis de ambiente da Vercel
-MESHY_API_KEY = os.environ.get("MESHY_API_KEY")
-HEADERS = {
-    "Authorization": f"Bearer {MESHY_API_KEY}",
-    "Content-Type": "application/json"
-}
 
 @app.route('/')
 def index():
@@ -21,61 +14,59 @@ def upload():
     if 'image' not in request.files:
         return jsonify({'error': 'Nenhuma imagem enviada'}), 400
     
-    image = request.files['image']
+    image_file = request.files['image']
+    image_bytes = image_file.read()
     
     try:
-        # A Meshy aceita o upload direto convertendo a imagem para formato base64
-        image_data = image.read()
-        base64_encoded = base64.b64encode(image_data).decode('utf-8')
-        mime_type = image.mimetype or 'image/jpeg'
-        data_uri = f"data:{mime_type};base64,{base64_encoded}"
+        # 1. Converter a foto recebida para o formato do OpenCV
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        payload = {
-            "image_url": data_uri,
-            "enable_pbr": True # Ativa texturas realistas
-        }
+        # 2. Processar a imagem para detetar bordas (escala de cinza, desfoque e Canny)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (7, 7), 0)
+        edged = cv2.Canny(gray, 50, 100)
+        edged = cv2.dilate(edged, None, iterations=1)
+        edged = cv2.erode(edged, None, iterations=1)
         
-        # 1. Pede à Meshy para gerar o modelo 3D
-        res = requests.post(
-            "https://api.meshy.ai/v1/image-to-3d",
-            headers=HEADERS,
-            json=payload
-        )
-        data = res.json()
+        # 3. Encontrar os objetos (contornos) na imagem
+        cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if res.status_code not in [200, 202]:
-            return jsonify({'error': f"Erro na Meshy: {data}"}), 500
+        # Ignorar sujidade ou pequenos reflexos filtrando pelo tamanho da área
+        valid_cnts = [c for c in cnts if cv2.contourArea(c) > 3000]
+        
+        if len(valid_cnts) < 2:
+            return jsonify({'error': 'Não foram detetados 2 objetos claros. Usa um fundo liso (ex: folha branca).'}), 400
             
-        task_id = data.get("result")
+        # 4. Ordenar os objetos da Esquerda para a Direita
+        valid_cnts = sorted(valid_cnts, key=lambda c: cv2.boundingRect(c)[0])
         
-        return jsonify({'capture_id': task_id})
+        # O objeto mais à esquerda (índice 0) deve ser o Cartão de Referência (85.6 mm)
+        ref_x, ref_y, ref_w, ref_h = cv2.boundingRect(valid_cnts[0])
+        pixels_por_milimetro = ref_w / 85.6
+        
+        # 5. Medir e desenhar retângulos verdes e os valores em mm
+        for c in valid_cnts:
+            x, y, w, h = cv2.boundingRect(c)
+            
+            largura_mm = w / pixels_por_milimetro
+            altura_mm = h / pixels_por_milimetro
+            
+            # Desenha a caixa verde
+            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            
+            # Escreve o texto com as medidas
+            texto = f"{largura_mm:.1f} x {altura_mm:.1f} mm"
+            cv2.putText(img, texto, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # 6. Converter a imagem processada de volta para envio ao navegador
+        _, buffer = cv2.imencode('.jpg', img)
+        img_b64 = base64.b64encode(buffer).decode('utf-8')
+        
+        return jsonify({'image_url': f"data:image/jpeg;base64,{img_b64}"})
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/status/<capture_id>', methods=['GET'])
-def status(capture_id):
-    try:
-        # 2. Pergunta à Meshy se o modelo já está pronto
-        res = requests.get(
-            f"https://api.meshy.ai/v1/image-to-3d/{capture_id}",
-            headers=HEADERS
-        )
-        data = res.json()
-        
-        estado = data.get("status", "").upper()
-        
-        if estado == "SUCCEEDED":
-            model_urls = data.get("model_urls", {})
-            # A Meshy devolve GLB (perfeito para web) ou OBJ. Vamos dar prioridade ao OBJ.
-            model_url = model_urls.get("obj") or model_urls.get("glb") or ""
-            return jsonify({'status': 'completed', 'model_url': model_url})
-            
-        elif estado in ["FAILED", "EXPIRED", "CANCELED"]:
-            return jsonify({'status': 'failed'})
-            
-        return jsonify({'status': estado.replace('IN_PROGRESS', 'PROCESSANDO')})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f"Erro a processar imagem: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
