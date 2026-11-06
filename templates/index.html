@@ -3,36 +3,36 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Paquímetro Fotográfico</title>
+    <title>Scanner com Folha A4</title>
     <style>
         body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f4f4f9; }
         video { width: 100%; max-width: 400px; background: #000; border-radius: 8px; margin-bottom: 15px; }
         canvas { display: none; }
-        img#resultImage { width: 100%; max-width: 500px; border-radius: 8px; margin-top: 20px; display: none; border: 2px solid #28a745; }
+        img#resultImage { width: 100%; max-width: 450px; border-radius: 8px; margin-top: 20px; display: none; border: 2px solid #28a745; }
         button { padding: 15px 20px; font-size: 16px; margin: 5px; cursor: pointer; border: none; border-radius: 5px; }
         #btnCapture { background-color: #28a745; color: white; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
         #status { margin-top: 20px; font-weight: bold; color: #333; }
-        .instructions { font-size: 14px; color: #555; margin-bottom: 15px; text-align: left; max-width: 400px; margin: 0 auto 15px auto; }
+        .instructions { font-size: 14px; color: #555; margin-bottom: 15px; text-align: left; max-width: 400px; margin: 0 auto 15px auto; line-height: 1.4; }
     </style>
 </head>
 <body>
-    <h2>Paquímetro Fotográfico</h2>
+    <h2>Medição com Folha A4</h2>
     
     <div class="instructions">
-        <strong>Regras para medição exata:</strong><br>
-        1. Coloca a peça numa folha de papel branca (para dar contraste).<br>
-        2. Coloca um <b>Cartão de Crédito</b> do lado <b>ESQUERDO</b> da peça.<br>
-        3. Tira a foto exatamente de cima (ângulo de 90 graus).
+        <strong>Instruções:</strong><br>
+        1. Coloca a folha A4 sobre uma superfície de cor diferente (ex: mesa de madeira).<br>
+        2. Coloca a peça mecânica no centro da folha.<br>
+        3. Enquadra a câmara de modo a que os <b>4 cantos da folha A4</b> fiquem visíveis no visor.
     </div>
     
     <video id="preview" autoplay muted playsinline></video>
     <canvas id="canvas"></canvas><br>
     
-    <button id="btnCapture">📸 Medir Peça</button>
+    <button id="btnCapture">📸 Tirar Foto e Medir</button>
     
-    <div id="status">A iniciar câmara...</div>
-    <img id="resultImage" alt="Resultado das medidas" />
+    <div id="status">A inicializar câmara...</div>
+    <img id="resultImage" alt="Resultado da medição" />
 
     <script>
         const videoPreview = document.getElementById('preview');
@@ -44,7 +44,7 @@
         async function initCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
+                    video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } 
                 });
                 videoPreview.srcObject = stream;
                 statusText.innerText = "Pronto para medir.";
@@ -55,14 +55,14 @@
 
         btnCapture.addEventListener('click', () => {
             btnCapture.disabled = true;
-            statusText.innerText = "A medir...";
+            statusText.innerText = "A analisar contornos da folha A4...";
             resultImage.style.display = "none";
             
             canvas.width = videoPreview.videoWidth;
             canvas.height = videoPreview.videoHeight;
             canvas.getContext('2d').drawImage(videoPreview, 0, 0);
             
-            canvas.toBlob(blob => { uploadImage(blob); }, 'image/jpeg', 0.9);
+            canvas.toBlob(blob => { uploadImage(blob); }, 'image/jpeg', 0.95);
         });
 
         async function uploadImage(imageBlob) {
@@ -74,14 +74,14 @@
                 const data = await response.json();
                 
                 if (data.image_url) {
-                    statusText.innerText = "Medição concluída!";
+                    statusText.innerText = "Medição concluída com sucesso!";
                     resultImage.src = data.image_url;
                     resultImage.style.display = "block";
                 } else {
                     statusText.innerText = "Erro: " + data.error;
                 }
             } catch (err) {
-                statusText.innerText = "Erro de ligação. Tenta novamente.";
+                statusText.innerText = "Falha de ligação ao servidor.";
             }
             btnCapture.disabled = false;
         }
