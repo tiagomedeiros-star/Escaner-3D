@@ -5,6 +5,22 @@ from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
 
+# Medidas reais de uma folha A4 em milímetros
+A4_LARGURA_MM = 210.0
+A4_ALTURA_MM = 297.0
+
+def ordenar_pontos(pts):
+    # Organiza os 4 cantos da folha: superior-esquerdo, superior-direito, inferior-direito, inferior-esquerdo
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -13,64 +29,84 @@ def index():
 def upload():
     if 'image' not in request.files:
         return jsonify({'error': 'Nenhuma imagem enviada'}), 400
-    
+
     image_file = request.files['image']
     image_bytes = image_file.read()
-    
+
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        # 1. Filtros melhorados para lidar com sombras e reflexos
+
+        # 1. Preparação da imagem para encontrar a folha A4
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (9, 9), 0)
-        
-        # Margens mais amplas para apanhar objetos com menos contraste
-        edged = cv2.Canny(gray, 30, 150)
-        
-        # Operação "Close" para unir linhas quebradas (fecha os contornos dos objetos)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        edged = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel)
-        
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edged = cv2.Canny(blur, 50, 150)
+
+        # 2. Procura pelo contorno da folha A4 (o maior retângulo com 4 cantos)
         cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+
+        folha_cnt = None
+        for c in cnts:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) == 4 and cv2.contourArea(c) > 10000:
+                folha_cnt = approx
+                break
+
+        if folha_cnt is None:
+            return jsonify({'error': 'Não foi possível detetar a folha A4 inteira. Certifica-te de que os 4 cantos do papel aparecem na foto.'}), 400
+
+        # 3. Correção de perspetiva da folha A4
+        pts_origem = ordenar_pontos(folha_cnt.reshape(4, 2))
         
-        # Reduzimos a área mínima para apanhar objetos mesmo se a foto for tirada de longe
-        valid_cnts = [c for c in cnts if cv2.contourArea(c) > 1000]
+        # Define o tamanho da imagem retificada proporcional à folha A4 (escala: ~3 pixels por mm)
+        largura_px = int(A4_LARGURA_MM * 3)
+        altura_px = int(A4_ALTURA_MM * 3)
         
-        # 2. MODO DEBUG: Se falhar, mostra o que a câmara viu
-        if len(valid_cnts) < 2:
-            cv2.putText(img, f"ERRO: Encontrou {len(valid_cnts)} objetos.", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.putText(img, "Melhora o contraste ou remove as sombras.", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            # Desenha a vermelho tudo o que o algoritmo considerou ser um objeto
-            cv2.drawContours(img, valid_cnts, -1, (0, 0, 255), 2)
-            
-            _, buffer = cv2.imencode('.jpg', img)
-            img_b64 = base64.b64encode(buffer).decode('utf-8')
-            return jsonify({'image_url': f"data:image/jpeg;base64,{img_b64}"})
-            
-        # 3. Ordenar da Esquerda (Cartão) para a Direita (Peça)
-        valid_cnts = sorted(valid_cnts, key=lambda c: cv2.boundingRect(c)[0])
-        
-        ref_x, ref_y, ref_w, ref_h = cv2.boundingRect(valid_cnts[0])
-        pixels_por_milimetro = ref_w / 85.6
-        
-        for c in valid_cnts:
-            x, y, w, h = cv2.boundingRect(c)
-            
-            largura_mm = w / pixels_por_milimetro
-            altura_mm = h / pixels_por_milimetro
-            
-            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            texto = f"{largura_mm:.1f} x {altura_mm:.1f} mm"
-            cv2.putText(img, texto, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        _, buffer = cv2.imencode('.jpg', img)
+        pts_destino = np.array([
+            [0, 0],
+            [largura_px - 1, 0],
+            [largura_px - 1, altura_px - 1],
+            [0, altura_px - 1]
+        ], dtype="float32")
+
+        matriz = cv2.getPerspectiveTransform(pts_origem, pts_destino)
+        folha_alinhada = cv2.warpPerspective(img, matriz, (largura_px, altura_px))
+
+        # Fator de escala: pixels por milímetro
+        px_por_mm = largura_px / A4_LARGURA_MM
+
+        # 4. Detetar a peça mecânica dentro da folha retificada
+        gray_folha = cv2.cvtColor(folha_alinhada, cv2.COLOR_BGR2GRAY)
+        # Binarização inversa: a folha branca vira fundo preto e a peça escura vira branca
+        _, thresh = cv2.threshold(gray_folha, 180, 255, cv2.THRESH_BINARY_INV)
+
+        peca_cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        pecas_validas = [c for c in peca_cnts if cv2.contourArea(c) > 500]
+
+        if not pecas_validas:
+            return jsonify({'error': 'Folha A4 detetada, mas nenhuma peça foi encontrada sobre ela.'}), 400
+
+        # Seleciona a maior forma sobre a folha (a peça principal)
+        peca_principal = max(pecas_validas, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(peca_principal)
+
+        largura_mm = w / px_por_mm
+        altura_mm = h / px_por_mm
+
+        # 5. Desenhar o resultado com as cotas em milímetros
+        cv2.rectangle(folha_alinhada, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        texto = f"{largura_mm:.1f} x {altura_mm:.1f} mm"
+        cv2.putText(folha_alinhada, texto, (x, max(25, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        _, buffer = cv2.imencode('.jpg', folha_alinhada)
         img_b64 = base64.b64encode(buffer).decode('utf-8')
-        
+
         return jsonify({'image_url': f"data:image/jpeg;base64,{img_b64}"})
-        
+
     except Exception as e:
-        return jsonify({'error': f"Erro a processar imagem: {str(e)}"}), 500
+        return jsonify({'error': f"Erro de processamento: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
