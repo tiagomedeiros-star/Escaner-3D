@@ -5,12 +5,10 @@ from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
 
-# Medidas reais de uma folha A4 em milímetros
-A4_LARGURA_MM = 210.0
-A4_ALTURA_MM = 297.0
+A4_MENOR_MM = 210.0
+A4_MAIOR_MM = 297.0
 
 def ordenar_pontos(pts):
-    # Organiza os 4 cantos da folha: superior-esquerdo, superior-direito, inferior-direito, inferior-esquerdo
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)]
@@ -37,12 +35,11 @@ def upload():
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # 1. Preparação da imagem para encontrar a folha A4
+        # 1. Encontrar o contorno da folha A4
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        edged = cv2.Canny(blur, 50, 150)
+        edged = cv2.Canny(blur, 40, 140)
 
-        # 2. Procura pelo contorno da folha A4 (o maior retângulo com 4 cantos)
         cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
 
@@ -55,15 +52,31 @@ def upload():
                 break
 
         if folha_cnt is None:
-            return jsonify({'error': 'Não foi possível detetar a folha A4 inteira. Certifica-te de que os 4 cantos do papel aparecem na foto.'}), 400
+            return jsonify({'error': 'Cantos da folha A4 não encontrados. Enquadre todo o papel com contraste no fundo.'}), 400
 
-        # 3. Correção de perspetiva da folha A4
+        # 2. Correção de perspetiva com rotação inteligente (Retrato vs Paisagem)
         pts_origem = ordenar_pontos(folha_cnt.reshape(4, 2))
-        
-        # Define o tamanho da imagem retificada proporcional à folha A4 (escala: ~3 pixels por mm)
-        largura_px = int(A4_LARGURA_MM * 3)
-        altura_px = int(A4_ALTURA_MM * 3)
-        
+        (tl, tr, br, bl) = pts_origem
+
+        largura_topo = np.linalg.norm(tr - tl)
+        largura_base = np.linalg.norm(br - bl)
+        largura_media = max(int(largura_topo), int(largura_base))
+
+        altura_dir = np.linalg.norm(tr - br)
+        altura_esq = np.linalg.norm(tl - bl)
+        altura_media = max(int(altura_dir), int(altura_esq))
+
+        # Determina a orientação real da folha no visor
+        if largura_media > altura_media:
+            largura_real_mm, altura_real_mm = A4_MAIOR_MM, A4_MENOR_MM
+        else:
+            largura_real_mm, altura_real_mm = A4_MENOR_MM, A4_MAIOR_MM
+
+        # Normaliza a escala (4 pixels por mm para alta precisão)
+        escala_px = 4
+        largura_px = int(largura_real_mm * escala_px)
+        altura_px = int(altura_real_mm * escala_px)
+
         pts_destino = np.array([
             [0, 0],
             [largura_px - 1, 0],
@@ -74,31 +87,42 @@ def upload():
         matriz = cv2.getPerspectiveTransform(pts_origem, pts_destino)
         folha_alinhada = cv2.warpPerspective(img, matriz, (largura_px, altura_px))
 
-        # Fator de escala: pixels por milímetro
-        px_por_mm = largura_px / A4_LARGURA_MM
+        px_por_mm = escala_px
 
-        # 4. Detetar a peça mecânica dentro da folha retificada
+        # 3. Segmentação com limiar adaptativo Otsu (elimina sombras graduais)
         gray_folha = cv2.cvtColor(folha_alinhada, cv2.COLOR_BGR2GRAY)
-        # Binarização inversa: a folha branca vira fundo preto e a peça escura vira branca
-        _, thresh = cv2.threshold(gray_folha, 180, 255, cv2.THRESH_BINARY_INV)
+        blur_folha = cv2.GaussianBlur(gray_folha, (7, 7), 0)
+        _, thresh = cv2.threshold(blur_folha, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Descarta bordas da própria folha (margem de segurança de 15px)
+        cv2.rectangle(thresh, (0, 0), (largura_px, altura_px), 0, 30)
 
         peca_cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        pecas_validas = [c for c in peca_cnts if cv2.contourArea(c) > 500]
+        pecas_validas = [c for c in peca_cnts if cv2.contourArea(c) > 1500]
 
         if not pecas_validas:
-            return jsonify({'error': 'Folha A4 detetada, mas nenhuma peça foi encontrada sobre ela.'}), 400
+            return jsonify({'error': 'Nenhuma peça identificada no interior da folha.'}), 400
 
-        # Seleciona a maior forma sobre a folha (a peça principal)
+        # 4. Caixa Delimitadora Girada (minAreaRect)
         peca_principal = max(pecas_validas, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(peca_principal)
+        rect_girado = cv2.minAreaRect(peca_principal)
+        (centro, (tam_1, tam_2), angulo) = rect_girado
 
-        largura_mm = w / px_por_mm
-        altura_mm = h / px_por_mm
+        # Converte pixels para milímetros
+        dim_a_mm = tam_1 / px_por_mm
+        dim_b_mm = tam_2 / px_por_mm
 
-        # 5. Desenhar o resultado com as cotas em milímetros
-        cv2.rectangle(folha_alinhada, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        texto = f"{largura_mm:.1f} x {altura_mm:.1f} mm"
-        cv2.putText(folha_alinhada, texto, (x, max(25, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        maior_dim = max(dim_a_mm, dim_b_mm)
+        menor_dim = min(dim_a_mm, dim_b_mm)
+
+        # 5. Desenhar o contorno orientado exato
+        box = cv2.boxPoints(rect_girado)
+        box = np.int0(box)
+        cv2.drawContours(folha_alinhada, [box], 0, (0, 255, 0), 3)
+
+        cx, cy = int(centro[0]), int(centro[1])
+        texto = f"{maior_dim:.1f} x {menor_dim:.1f} mm"
+        cv2.putText(folha_alinhada, texto, (cx - 100, max(40, cy)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
         _, buffer = cv2.imencode('.jpg', folha_alinhada)
         img_b64 = base64.b64encode(buffer).decode('utf-8')
@@ -106,7 +130,7 @@ def upload():
         return jsonify({'image_url': f"data:image/jpeg;base64,{img_b64}"})
 
     except Exception as e:
-        return jsonify({'error': f"Erro de processamento: {str(e)}"}), 500
+        return jsonify({'error': f"Falha no processamento: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
